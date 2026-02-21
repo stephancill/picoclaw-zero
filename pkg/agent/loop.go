@@ -997,6 +997,13 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) 
 	args := parts[1:]
 
 	switch cmd {
+	case "/new":
+		al.sessions.SetHistory(msg.SessionKey, []providers.Message{})
+		al.sessions.SetSummary(msg.SessionKey, "")
+		_ = al.sessions.Save(msg.SessionKey)
+		al.summarizing.Delete(msg.SessionKey)
+		return "Started a new conversation. Session history cleared.", true
+
 	case "/show":
 		if len(args) < 1 {
 			return "Usage: /show [model|channel]", true

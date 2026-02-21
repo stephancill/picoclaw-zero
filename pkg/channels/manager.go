@@ -59,6 +59,19 @@ func (m *Manager) initChannels() error {
 		}
 	}
 
+	if m.config.Channels.Server.Enabled {
+		logger.DebugC("channels", "Attempting to initialize Server channel")
+		serverCh, err := NewServerChannel(m.config.Channels.Server, m.bus)
+		if err != nil {
+			logger.ErrorCF("channels", "Failed to initialize Server channel", map[string]interface{}{
+				"error": err.Error(),
+			})
+		} else {
+			m.channels["server"] = serverCh
+			logger.InfoC("channels", "Server channel enabled successfully")
+		}
+	}
+
 	if m.config.Channels.WhatsApp.Enabled && m.config.Channels.WhatsApp.BridgeURL != "" {
 		logger.DebugC("channels", "Attempting to initialize WhatsApp channel")
 		whatsapp, err := NewWhatsAppChannel(m.config.Channels.WhatsApp, m.bus)
