@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,35 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/tools"
 )
+
+func TestBuildLLMUserMessage_WithoutReplyContext(t *testing.T) {
+	msg := bus.InboundMessage{Content: "hello"}
+	result := buildLLMUserMessage(msg)
+	if result != "hello" {
+		t.Fatalf("result = %q, want %q", result, "hello")
+	}
+}
+
+func TestBuildLLMUserMessage_WithReplyContext(t *testing.T) {
+	msg := bus.InboundMessage{
+		Content: "this is my answer",
+		Metadata: map[string]string{
+			"reply_to_username": "alice",
+			"reply_to_content":  "what is the status?",
+		},
+	}
+
+	result := buildLLMUserMessage(msg)
+	if !strings.Contains(result, "reply to @alice") {
+		t.Fatalf("expected reply context in %q", result)
+	}
+	if !strings.Contains(result, "what is the status?") {
+		t.Fatalf("expected original replied message in %q", result)
+	}
+	if !strings.Contains(result, "this is my answer") {
+		t.Fatalf("expected user reply in %q", result)
+	}
+}
 
 // mockProvider is a simple mock LLM provider for testing
 type mockProvider struct{}

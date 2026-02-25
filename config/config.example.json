@@ -18,6 +18,15 @@
         "YOUR_USER_ID"
       ]
     },
+    "server": {
+      "enabled": false,
+      "host": "127.0.0.1",
+      "port": 18792,
+      "path_prefix": "/api/server",
+      "auth_token": "",
+      "max_queue_size": 100,
+      "allow_from": []
+    },
     "discord": {
       "enabled": false,
       "token": "YOUR_DISCORD_BOT_TOKEN",

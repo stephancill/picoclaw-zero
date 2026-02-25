@@ -52,6 +52,7 @@ type processOptions struct {
 	Channel         string // Target channel for tool execution
 	ChatID          string // Target chat ID for tool execution
 	UserMessage     string // User message content (may include prefix)
+	UserMessageLLM  string // User message content sent to the model
 	DefaultResponse string // Response when LLM returns empty
 	EnableSummary   bool   // Whether to trigger summarization
 	SendResponse    bool   // Whether to send response via bus
@@ -103,6 +104,18 @@ func createToolRegistry(workspace string, restrict bool, cfg *config.Config, msg
 		return nil
 	})
 	registry.Register(messageTool)
+
+	telegramMessageTool := tools.NewTelegramMessageTool()
+	telegramMessageTool.SetSendCallback(func(chatID, content, attachmentPath string) error {
+		msgBus.PublishOutbound(bus.OutboundMessage{
+			Channel:        "telegram",
+			ChatID:         chatID,
+			Content:        content,
+			AttachmentPath: attachmentPath,
+		})
+		return nil
+	})
+	registry.Register(telegramMessageTool)
 
 	return registry
 }
@@ -179,6 +192,13 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 				if tool, ok := al.tools.Get("message"); ok {
 					if mt, ok := tool.(*tools.MessageTool); ok {
 						alreadySent = mt.HasSentInRound()
+					}
+				}
+				if !alreadySent {
+					if tool, ok := al.tools.Get("telegram_message"); ok {
+						if tmt, ok := tool.(*tools.TelegramMessageTool); ok {
+							alreadySent = tmt.HasSentInRound()
+						}
 					}
 				}
 
@@ -278,15 +298,36 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	}
 
 	// Process as user message
+	llmMessage := buildLLMUserMessage(msg)
 	return al.runAgentLoop(ctx, processOptions{
 		SessionKey:      msg.SessionKey,
 		Channel:         msg.Channel,
 		ChatID:          msg.ChatID,
 		UserMessage:     msg.Content,
+		UserMessageLLM:  llmMessage,
 		DefaultResponse: "I've completed processing but have no response to give.",
 		EnableSummary:   true,
 		SendResponse:    false,
 	})
+}
+
+func buildLLMUserMessage(msg bus.InboundMessage) string {
+	if msg.Metadata == nil {
+		return msg.Content
+	}
+
+	replyContent := strings.TrimSpace(msg.Metadata["reply_to_content"])
+	if replyContent == "" {
+		return msg.Content
+	}
+
+	replyUser := strings.TrimSpace(msg.Metadata["reply_to_username"])
+	replyLabel := "previous message"
+	if replyUser != "" {
+		replyLabel = "@" + replyUser
+	}
+
+	return fmt.Sprintf("[This message is a reply to %s]\n%s\n\n[User reply]\n%s", replyLabel, replyContent, msg.Content)
 }
 
 func (al *AgentLoop) processSystemMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
@@ -365,10 +406,15 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, opts processOptions) (str
 		history = al.sessions.GetHistory(opts.SessionKey)
 		summary = al.sessions.GetSummary(opts.SessionKey)
 	}
+	userMessageForLLM := opts.UserMessage
+	if opts.UserMessageLLM != "" {
+		userMessageForLLM = opts.UserMessageLLM
+	}
+
 	messages := al.contextBuilder.BuildMessages(
 		history,
 		summary,
-		opts.UserMessage,
+		userMessageForLLM,
 		nil,
 		opts.Channel,
 		opts.ChatID,
@@ -728,7 +774,7 @@ func (al *AgentLoop) maybeSummarize(sessionKey, channel, chatID string) {
 	tokenEstimate := al.estimateTokens(newHistory)
 	threshold := al.contextWindow * 75 / 100
 
-	if len(newHistory) > 20 || tokenEstimate > threshold {
+	if tokenEstimate > threshold {
 		if _, loading := al.summarizing.LoadOrStore(sessionKey, true); !loading {
 			go func() {
 				defer al.summarizing.Delete(sessionKey)
@@ -997,6 +1043,13 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) 
 	args := parts[1:]
 
 	switch cmd {
+	case "/new":
+		al.sessions.SetHistory(msg.SessionKey, []providers.Message{})
+		al.sessions.SetSummary(msg.SessionKey, "")
+		_ = al.sessions.Save(msg.SessionKey)
+		al.summarizing.Delete(msg.SessionKey)
+		return "Started a new conversation. Session history cleared.", true
+
 	case "/show":
 		if len(args) < 1 {
 			return "Usage: /show [model|channel]", true

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -157,6 +158,14 @@ func (c *TelegramChannel) Send(ctx context.Context, msg bus.OutboundMessage) err
 		c.stopThinking.Delete(msg.ChatID)
 	}
 
+	if msg.AttachmentPath != "" {
+		if pID, ok := c.placeholders.Load(msg.ChatID); ok {
+			c.placeholders.Delete(msg.ChatID)
+			_ = c.bot.DeleteMessage(ctx, tu.Delete(tu.ID(chatID), pID.(int)))
+		}
+		return c.sendAttachment(ctx, chatID, msg.Content, msg.AttachmentPath)
+	}
+
 	htmlContent := markdownToTelegramHTML(msg.Content)
 
 	// Try to edit placeholder
@@ -180,6 +189,54 @@ func (c *TelegramChannel) Send(ctx context.Context, msg bus.OutboundMessage) err
 		})
 		tgMsg.ParseMode = ""
 		_, err = c.bot.SendMessage(ctx, tgMsg)
+		return err
+	}
+
+	return nil
+}
+
+func (c *TelegramChannel) sendAttachment(ctx context.Context, chatID int64, content, attachmentPath string) error {
+	file, err := os.Open(attachmentPath)
+	if err != nil {
+		return fmt.Errorf("opening attachment: %w", err)
+	}
+	defer file.Close()
+
+	htmlCaption := markdownToTelegramHTML(content)
+	inputFile := tu.File(file)
+	ext := strings.ToLower(filepath.Ext(attachmentPath))
+
+	if ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif" || ext == ".webp" {
+		params := tu.Photo(tu.ID(chatID), inputFile)
+		if htmlCaption != "" {
+			params.Caption = htmlCaption
+			params.ParseMode = telego.ModeHTML
+		}
+
+		if _, err := c.bot.SendPhoto(ctx, params); err != nil {
+			if htmlCaption != "" {
+				params.Caption = content
+				params.ParseMode = ""
+				_, err = c.bot.SendPhoto(ctx, params)
+			}
+			return err
+		}
+
+		return nil
+	}
+
+	params := tu.Document(tu.ID(chatID), inputFile)
+	if htmlCaption != "" {
+		params.Caption = htmlCaption
+		params.ParseMode = telego.ModeHTML
+	}
+
+	if _, err := c.bot.SendDocument(ctx, params); err != nil {
+		if htmlCaption != "" {
+			params.Caption = content
+			params.ParseMode = ""
+			_, err = c.bot.SendDocument(ctx, params)
+		}
 		return err
 	}
 
@@ -355,6 +412,18 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 		"is_group":   fmt.Sprintf("%t", message.Chat.Type != "private"),
 	}
 
+	if message.ReplyToMessage != nil {
+		reply := message.ReplyToMessage
+		metadata["reply_to_message_id"] = fmt.Sprintf("%d", reply.MessageID)
+		if reply.From != nil {
+			metadata["reply_to_user_id"] = fmt.Sprintf("%d", reply.From.ID)
+			metadata["reply_to_username"] = reply.From.Username
+		}
+		if replyPreview := buildTelegramReplyPreview(reply); replyPreview != "" {
+			metadata["reply_to_content"] = replyPreview
+		}
+	}
+
 	c.HandleMessage(fmt.Sprintf("%d", user.ID), fmt.Sprintf("%d", chatID), content, mediaPaths, metadata)
 	return nil
 }
@@ -402,6 +471,45 @@ func parseChatID(chatIDStr string) (int64, error) {
 	var id int64
 	_, err := fmt.Sscanf(chatIDStr, "%d", &id)
 	return id, err
+}
+
+func buildTelegramReplyPreview(message *telego.Message) string {
+	if message == nil {
+		return ""
+	}
+
+	parts := make([]string, 0, 2)
+	if message.Text != "" {
+		parts = append(parts, message.Text)
+	}
+	if message.Caption != "" {
+		parts = append(parts, message.Caption)
+	}
+
+	if len(parts) > 0 {
+		return strings.Join(parts, "\n")
+	}
+
+	if len(message.Photo) > 0 {
+		return "[photo]"
+	}
+	if message.Voice != nil {
+		return "[voice]"
+	}
+	if message.Audio != nil {
+		return "[audio]"
+	}
+	if message.Document != nil {
+		return "[file]"
+	}
+	if message.Video != nil {
+		return "[video]"
+	}
+	if message.Sticker != nil {
+		return "[sticker]"
+	}
+
+	return "[message]"
 }
 
 func markdownToTelegramHTML(text string) string {
